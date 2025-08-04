@@ -1,0 +1,326 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, query, where, onSnapshot, serverTimestamp } from 'firebase/firestore';
+
+// Firebase 설정 및 앱 ID 가져오기
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+function App() {
+    // Firebase 인스턴스 및 사용자 ID 상태
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+
+    // 입력 필드 상태
+    const [grade, setGrade] = useState('');
+    const [studentNumber, setStudentNumber] = useState('');
+    const [studentName, setStudentName] = useState('');
+    const [bookTitle, setBookTitle] = useState('');
+    const [author, setAuthor] = useState('');
+    const [readDate, setReadDate] = useState('');
+
+    // 학생의 독서 기록 목록 상태
+    const [studentRecords, setStudentRecords] = useState([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [message, setMessage] = useState('');
+
+    // Firebase 초기화 및 인증 처리
+    useEffect(() => {
+        try {
+            const app = initializeApp(firebaseConfig);
+            const firestore = getFirestore(app);
+            const firebaseAuth = getAuth(app);
+
+            setDb(firestore);
+            setAuth(firebaseAuth);
+
+            // 인증 상태 변경 리스너
+            const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                } else {
+                    // 사용자 정의 토큰이 있으면 로그인, 없으면 익명 로그인
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(firebaseAuth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(firebaseAuth);
+                    }
+                    setUserId(firebaseAuth.currentUser?.uid || crypto.randomUUID()); // 익명 로그인 후에도 userId 설정
+                }
+                setIsAuthReady(true); // 인증 준비 완료
+                setIsLoading(false);
+            });
+
+            return () => unsubscribe(); // 클린업 함수
+        } catch (error) {
+            console.error("Firebase 초기화 중 오류 발생:", error);
+            setMessage("앱 초기화 중 오류가 발생했습니다.");
+            setIsLoading(false);
+        }
+    }, []);
+
+    // 학생 정보 변경 시 해당 학생의 독서 기록 불러오기
+    useEffect(() => {
+        // 학년, 번호, 이름 중 하나라도 비어있으면 조회를 하지 않고 기록을 초기화합니다.
+        if (!db || !isAuthReady || !userId || !grade || !studentNumber || !studentName) {
+            setStudentRecords([]);
+            return;
+        }
+
+        setMessage('독서 기록을 불러오는 중...');
+        // Firestore 컬렉션 경로 (사용자별 비공개 데이터)
+        const recordsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/readingRecords`);
+
+        // 학년, 번호, 이름으로 쿼리
+        const q = query(
+            recordsCollectionRef,
+            where('grade', '==', grade),
+            where('studentNumber', '==', studentNumber),
+            where('studentName', '==', studentName)
+        );
+
+        // 실시간 업데이트 리스너
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const records = [];
+            snapshot.forEach((doc) => {
+                records.push({ id: doc.id, ...doc.data() });
+            });
+            // 날짜 (readDate) 기준으로 정렬 (최신 날짜가 위로 오도록)
+            records.sort((a, b) => {
+                if (a.readDate && b.readDate) {
+                    return new Date(b.readDate) - new Date(a.readDate);
+                }
+                return 0;
+            });
+            setStudentRecords(records);
+            setMessage('독서 기록이 업데이트되었습니다.');
+        }, (error) => {
+            console.error("독서 기록 불러오기 중 오류 발생:", error);
+            setMessage("독서 기록을 불러오는 데 실패했습니다.");
+        });
+
+        return () => unsubscribe(); // 클린업 함수
+    }, [db, isAuthReady, userId, grade, studentNumber, studentName]); // 의존성 배열
+
+    // 독서 기록 추가 핸들러
+    const handleAddRecord = async (e) => {
+        e.preventDefault();
+
+        if (!db || !userId) {
+            setMessage("데이터베이스 연결 준비 중입니다. 잠시 후 다시 시도해주세요.");
+            return;
+        }
+
+        if (!grade || !studentNumber || !studentName || !bookTitle || !author || !readDate) {
+            setMessage("모든 필드를 입력해주세요.");
+            return;
+        }
+
+        setMessage('독서 기록을 저장 중...');
+        try {
+            // Firestore 컬렉션 경로 (사용자별 비공개 데이터)
+            const recordsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/readingRecords`);
+            await addDoc(recordsCollectionRef, {
+                grade,
+                studentNumber,
+                studentName,
+                bookTitle,
+                author,
+                readDate,
+                timestamp: serverTimestamp() // 서버 타임스탬프 추가
+            });
+            setMessage('독서 기록이 성공적으로 저장되었습니다!');
+            // 책 제목과 저자 필드 초기화
+            setBookTitle('');
+            setAuthor('');
+        } catch (error) {
+            console.error("독서 기록 저장 중 오류 발생:", error);
+            setMessage("독서 기록 저장에 실패했습니다.");
+        }
+    };
+
+    if (isLoading) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-100">
+                <p className="text-lg font-semibold text-gray-700">앱을 로드하는 중입니다...</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-6 lg:p-8 flex flex-col items-center">
+            <script src="https://cdn.tailwindcss.com"></script>
+            {/* Poor Story 폰트 추가 */}
+            <link href="https://fonts.googleapis.com/css2?family=Poor+Story&display=swap" rel="stylesheet" />
+            <style>
+                {`
+                body {
+                    font-family: 'Poor Story', cursive; /* Poor Story 폰트 적용 */
+                }
+                input[type="date"]::-webkit-calendar-picker-indicator {
+                    filter: invert(0.5) sepia(1) saturate(5) hue-rotate(175deg) brightness(0.9);
+                }
+                `}
+            </style>
+
+            <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-4xl mb-8 border border-blue-200">
+                <h1 className="text-3xl sm:text-4xl font-bold text-center text-blue-700 mb-6 flex items-center justify-center">
+                    <span className="mr-3 text-4xl sm:text-5xl">📖</span> 독서 활동 일지
+                </h1>
+                <p className="text-center text-gray-600 mb-4">현재 사용자 ID: <span className="font-mono text-sm bg-gray-100 px-2 py-1 rounded-md">{userId || 'N/A'}</span></p>
+
+                <form onSubmit={handleAddRecord} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div>
+                            <label htmlFor="grade" className="block text-sm font-medium text-gray-700 mb-1">학년</label>
+                            <input
+                                type="text"
+                                id="grade"
+                                value={grade}
+                                onChange={(e) => setGrade(e.target.value)}
+                                placeholder="예: 3"
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="studentNumber" className="block text-sm font-medium text-gray-700 mb-1">번호</label>
+                            <input
+                                type="text"
+                                id="studentNumber"
+                                value={studentNumber}
+                                onChange={(e) => setStudentNumber(e.target.value)}
+                                placeholder="예: 15"
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="studentName" className="block text-sm font-medium text-gray-700 mb-1">이름</label>
+                            <input
+                                type="text"
+                                id="studentName"
+                                value={studentName}
+                                onChange={(e) => setStudentName(e.target.value)}
+                                placeholder="예: 홍길동"
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                                required
+                            />
+                        </div>
+                    </div>
+
+                    <hr className="my-6 border-gray-200" />
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label htmlFor="bookTitle" className="block text-sm font-medium text-gray-700 mb-1">책 제목</label>
+                            <input
+                                type="text"
+                                id="bookTitle"
+                                value={bookTitle}
+                                onChange={(e) => setBookTitle(e.target.value)}
+                                placeholder="예: 어린 왕자"
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="author" className="block text-sm font-medium text-gray-700 mb-1">저자</label>
+                            <input
+                                type="text"
+                                id="author"
+                                value={author}
+                                onChange={(e) => setAuthor(e.target.value)}
+                                placeholder="예: 앙투안 드 생텍쥐페리"
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                                required
+                            />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label htmlFor="readDate" className="block text-sm font-medium text-gray-700 mb-1">날짜</label>
+                        <input
+                            type="date"
+                            id="readDate"
+                            value={readDate}
+                            onChange={(e) => setReadDate(e.target.value)}
+                            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                            required
+                        />
+                    </div>
+
+                    <button
+                        type="submit"
+                        className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-lg font-semibold text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out"
+                    >
+                        기록 추가
+                    </button>
+                </form>
+
+                {message && (
+                    <p className={`mt-4 text-center text-sm ${message.includes('실패') ? 'text-red-600' : 'text-green-600'}`}>
+                        {message}
+                    </p>
+                )}
+            </div>
+
+            <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-4xl border border-blue-200">
+                <h2 className="text-2xl sm:text-3xl font-bold text-center text-blue-700 mb-6 flex items-center justify-center">
+                    <span className="mr-3 text-3xl sm:text-4xl">📚</span> 독서 기록 조회
+                </h2>
+                {studentRecords.length === 0 && (grade || studentNumber || studentName) ? (
+                    <p className="text-center text-gray-500">
+                        {grade && studentNumber && studentName
+                            ? `${grade}학년 ${studentNumber}번 ${studentName} 학생의 독서 기록이 없습니다. 새로운 기록을 추가해보세요!`
+                            : '정확한 독서 기록 조회를 위해 학년, 번호, 이름을 모두 입력해주세요.'
+                        }
+                    </p>
+                ) : studentRecords.length === 0 ? (
+                    <p className="text-center text-gray-500">
+                        정확한 독서 기록 조회를 위해 학년, 번호, 이름을 모두 입력해주세요.
+                    </p>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-gray-200 rounded-lg overflow-hidden">
+                            <thead className="bg-blue-50">
+                                <tr>
+                                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                                        날짜
+                                    </th>
+                                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                                        책 제목
+                                    </th>
+                                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                                        저자
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                                {studentRecords.map((record) => (
+                                    <tr key={record.id} className="hover:bg-gray-50">
+                                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-800">
+                                            {record.readDate}
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-blue-600">
+                                            {record.bookTitle}
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                                            {record.author}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+export default App;
