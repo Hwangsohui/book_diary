@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>독서 활동 일지</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts - Poor Story (손글씨 폰트) -->
+    <link href="https://fonts.googleapis.com/css2?family=Poor+Story&display=swap" rel="stylesheet" />
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, where, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Configuration and App ID
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId;
+
+        // Function to show a custom message box instead of alert()
+        function showMessage(text, isError = false) {
+            const messageBox = document.getElementById('message-box');
+            messageBox.textContent = text;
+            messageBox.className = `mt-4 text-center text-sm ${isError ? 'text-red-600' : 'text-green-600'}`;
+        }
+
+        // Initialize Firebase and Authentication on window load
+        window.onload = async function() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Authenticate the user
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                userId = auth.currentUser?.uid || crypto.randomUUID();
+                document.getElementById('user-id-display').textContent = userId;
+
+                // Event listener for form submission
+                document.getElementById('record-form').addEventListener('submit', handleAddRecord);
+
+                // Add event listeners to input fields to trigger record fetching
+                const inputs = ['grade', 'student-number', 'student-name'];
+                inputs.forEach(id => {
+                    document.getElementById(id).addEventListener('input', fetchStudentRecords);
+                });
+
+                // Initial fetch to load records if inputs are pre-filled
+                fetchStudentRecords();
+
+            } catch (error) {
+                console.error("Firebase 초기화 중 오류 발생:", error);
+                showMessage("앱 초기화 중 오류가 발생했습니다.", true);
+            }
+        };
+
+        async function handleAddRecord(e) {
+            e.preventDefault();
+            
+            if (!db || !userId) {
+                showMessage("데이터베이스 연결 준비 중입니다. 잠시 후 다시 시도해주세요.", true);
+                return;
+            }
+
+            const grade = document.getElementById('grade').value;
+            const studentNumber = document.getElementById('student-number').value;
+            const studentName = document.getElementById('student-name').value;
+            const bookTitle = document.getElementById('book-title').value;
+            const author = document.getElementById('author').value;
+            const readDate = document.getElementById('read-date').value;
+
+            if (!grade || !studentNumber || !studentName || !bookTitle || !author || !readDate) {
+                showMessage("모든 필드를 입력해주세요.", true);
+                return;
+            }
+
+            showMessage('독서 기록을 저장 중...');
+            try {
+                const recordsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/readingRecords`);
+                await addDoc(recordsCollectionRef, {
+                    grade,
+                    studentNumber,
+                    studentName,
+                    bookTitle,
+                    author,
+                    readDate,
+                    timestamp: serverTimestamp()
+                });
+                showMessage('독서 기록이 성공적으로 저장되었습니다!');
+
+                // Clear book-related fields for new entry
+                document.getElementById('book-title').value = '';
+                document.getElementById('author').value = '';
+                // No need to clear date or student info as they might be entering for the same student
+            } catch (error) {
+                console.error("독서 기록 저장 중 오류 발생:", error);
+                showMessage("독서 기록 저장에 실패했습니다.", true);
+            }
+        }
+
+        function fetchStudentRecords() {
+            const grade = document.getElementById('grade').value;
+            const studentNumber = document.getElementById('student-number').value;
+            const studentName = document.getElementById('student-name').value;
+            const recordsTableBody = document.getElementById('records-table-body');
+            const recordMessage = document.getElementById('record-message');
+            recordsTableBody.innerHTML = ''; // Clear previous records
+
+            if (!db || !userId) {
+                recordMessage.textContent = '앱을 로드하는 중입니다. 잠시만 기다려주세요.';
+                return;
+            }
+            
+            if (!grade || !studentNumber || !studentName) {
+                recordMessage.textContent = '정확한 독서 기록 조회를 위해 학년, 번호, 이름을 모두 입력해주세요.';
+                return;
+            }
+
+            recordMessage.textContent = '독서 기록을 불러오는 중...';
+            
+            const recordsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/readingRecords`);
+            const q = query(
+                recordsCollectionRef,
+                where('grade', '==', grade),
+                where('studentNumber', '==', studentNumber),
+                where('studentName', '==', studentName)
+            );
+
+            // onSnapshot provides real-time updates
+            onSnapshot(q, (snapshot) => {
+                recordsTableBody.innerHTML = ''; // Clear old data before re-rendering
+                const records = [];
+                snapshot.forEach((doc) => {
+                    records.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Sort records by date in descending order
+                records.sort((a, b) => new Date(b.readDate) - new Date(a.readDate));
+
+                if (records.length === 0) {
+                    recordMessage.textContent = `${grade}학년 ${studentNumber}번 ${studentName} 학생의 독서 기록이 없습니다. 새로운 기록을 추가해보세요!`;
+                } else {
+                    recordMessage.textContent = ''; // Clear message if records are found
+                    records.forEach((record) => {
+                        const row = document.createElement('tr');
+                        row.className = "hover:bg-gray-50";
+                        row.innerHTML = `
+                            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-800">${record.readDate}</td>
+                            <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-blue-600">${record.bookTitle}</td>
+                            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-700">${record.author}</td>
+                        `;
+                        recordsTableBody.appendChild(row);
+                    });
+                }
+            }, (error) => {
+                console.error("독서 기록 불러오기 중 오류 발생:", error);
+                recordMessage.textContent = "독서 기록을 불러오는 데 실패했습니다.";
+            });
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Poor Story', cursive; /* Poor Story 폰트 적용 */
+        }
+        /* Style for the date input's calendar icon */
+        input[type="date"]::-webkit-calendar-picker-indicator {
+            filter: invert(0.5) sepia(1) saturate(5) hue-rotate(175deg) brightness(0.9);
+        }
+        /* Utility class to hide an element */
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-6 lg:p-8 flex flex-col items-center">
+
+    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-4xl mb-8 border border-blue-200">
+        <h1 class="text-3xl sm:text-4xl font-bold text-center text-blue-700 mb-6 flex items-center justify-center">
+            <span class="mr-3 text-4xl sm:text-5xl">📖</span> 독서 활동 일지
+        </h1>
+        <p class="text-center text-gray-600 mb-4">현재 사용자 ID: <span id="user-id-display" class="font-mono text-sm bg-gray-100 px-2 py-1 rounded-md"></span></p>
+
+        <form id="record-form" class="space-y-4">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                    <label for="grade" class="block text-sm font-medium text-gray-700 mb-1">학년</label>
+                    <input type="text" id="grade" placeholder="예: 3"
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" required>
+                </div>
+                <div>
+                    <label for="student-number" class="block text-sm font-medium text-gray-700 mb-1">번호</label>
+                    <input type="text" id="student-number" placeholder="예: 15"
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" required>
+                </div>
+                <div>
+                    <label for="student-name" class="block text-sm font-medium text-gray-700 mb-1">이름</label>
+                    <input type="text" id="student-name" placeholder="예: 홍길동"
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" required>
+                </div>
+            </div>
+
+            <hr class="my-6 border-gray-200" />
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <label for="book-title" class="block text-sm font-medium text-gray-700 mb-1">책 제목</label>
+                    <input type="text" id="book-title" placeholder="예: 어린 왕자"
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" required>
+                </div>
+                <div>
+                    <label for="author" class="block text-sm font-medium text-gray-700 mb-1">저자</label>
+                    <input type="text" id="author" placeholder="예: 앙투안 드 생텍쥐페리"
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" required>
+                </div>
+            </div>
+
+            <div>
+                <label for="read-date" class="block text-sm font-medium text-gray-700 mb-1">날짜</label>
+                <input type="date" id="read-date"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" required>
+            </div>
+
+            <button type="submit"
+                    class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-lg font-semibold text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out">
+                기록 추가
+            </button>
+        </form>
+
+        <p id="message-box" class="mt-4 text-center text-sm"></p>
+    </div>
+
+    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-4xl border border-blue-200">
+        <h2 class="text-2xl sm:text-3xl font-bold text-center text-blue-700 mb-6 flex items-center justify-center">
+            <span class="mr-3 text-3xl sm:text-4xl">📚</span> 독서 기록 조회
+        </h2>
+        
+        <p id="record-message" class="text-center text-gray-500">
+            정확한 독서 기록 조회를 위해 학년, 번호, 이름을 모두 입력해주세요.
+        </p>
+
+        <div class="overflow-x-auto mt-4">
+            <table class="min-w-full divide-y divide-gray-200 rounded-lg overflow-hidden">
+                <thead class="bg-blue-50">
+                    <tr>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                            날짜
+                        </th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                            책 제목
+                        </th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">
+                            저자
+                        </th>
+                    </tr>
+                </thead>
+                <tbody id="records-table-body" class="bg-white divide-y divide-gray-200">
+                    <!-- 독서 기록이 여기에 동적으로 추가됩니다 -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
